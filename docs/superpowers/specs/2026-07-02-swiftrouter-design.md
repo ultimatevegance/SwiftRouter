@@ -231,3 +231,102 @@ Swift 6 strict concurrency throughout. `Router` is `@MainActor`; `Route` values 
 - Macro-based route declaration (`@Routable`) — possible later sugar on the same registry
 - Route state restoration / persistence
 - watchOS/tvOS/macOS support
+
+---
+
+## Revision 2 (2026-07-02) — dynamic web-router layer
+
+**Trigger:** user request — guards like `beforeEach`, `replace`/`redirect` APIs "just like web router", with a vue-router/uni-app-flavored usage sample as the target shape.
+
+The typed core above stays. A dynamic, string-based layer is added on the **same engine** — one pattern matcher, one guard pipeline, one transition performer. Vue idioms are adapted to Swift: guards return a decision from an async closure (vue-router 4's return-value style) rather than calling `next(...)`.
+
+### Route table — `RouteRecord` / `addRoutes`
+
+```swift
+router.addRoutes([
+    RouteRecord(name: "tabbar", path: "/tabbar") { _ in TabBarViewController() },
+    RouteRecord(name: "login", path: "/login", meta: RouteMeta(transition: .present())) { location in
+        let vc = LoginViewController()
+        vc.callback = location.context as? CallBackBlock
+        return vc
+    },
+    RouteRecord(name: "novel_detail", path: "/novel/:id") { location in
+        NovelDetailViewController(id: location.params["id"] ?? "")
+    },
+    RouteRecord(name: "reading", path: "/reading", action: { location in
+        let novelID = Int(location.query["novel_id"] ?? "") ?? 0
+        ReaderManager.shared.loadData(novelID: novelID) { novel in
+            Router.shared.push(path: "/reader", context: novel)
+        }
+        return true
+    }),
+    RouteRecord(name: "old_page", path: "/old", redirect: .path("/novel/list")),
+])
+```
+
+Rules:
+
+- `path` accepts vue-style `:param` placeholders (string-typed); the typed `<int:id>` syntax from the deep-link layer is also accepted in the same pattern.
+- Exactly one of `component:` / `action:` / `redirect:` per record (enforced by the three initializers).
+- `name` is optional but must be unique — duplicate names are last-wins with a DEBUG warning, same policy as factory re-registration.
+- Record patterns participate in `open(url:)` matching alongside `DeepLinkable` patterns (scheme-less patterns match any scheme).
+- Action records run their closure after guards; they perform no transition. Their `Bool` is the "handled" result.
+- Redirect records re-enter matching **before** guards run (vue semantics: guards fire for the final destination). Every hop — record redirects and guard redirects alike — counts against the shared redirect cap of 8.
+
+### RouteLocation
+
+The dynamic layer's currency, passed to component closures, actions, and guards:
+
+```swift
+public struct RouteLocation {
+    public let name: String?               // record name, or the type name for typed routes
+    public let path: String                // concrete path, e.g. "/novel/123"
+    public let params: [String: String]    // path placeholder values
+    public let query: [String: String]     // query values (explicit dict wins over inline "?k=v")
+    public let context: Any?               // arbitrary payload (callbacks, models) — never crosses actors
+    public let meta: RouteMeta
+    public let url: URL?                   // non-nil when navigation came through open(url:)
+    public let route: (any Route)?         // typed payload when navigation began from a typed route
+}
+```
+
+`RouteMeta(transition:requiresAuth:tabIndex:userInfo:)` — `requiresAuth` and `userInfo: [String: Any]` are data for the app's own guards; the router itself only interprets `transition` and `tabIndex`.
+
+### Guards — beforeEach / afterEach
+
+```swift
+router.beforeEach { to, from in
+    if to.name == "profile", !AccountService.shared.isLogin {
+        return .redirect(.name("login"))
+    }
+    return .allow
+}
+router.afterEach { to, from in Analytics.track(to.path) }
+```
+
+- Vue mapping: `next(true)` → `.allow`, `next(false)` → `.cancel`, "push elsewhere then `next(false)`" → `.redirect(.name("login"))`.
+- `NavigationGuard.check(to:from:)` (locations) **supersedes** the earlier `check(_:context:)` signature; typed navigations surface their route value as `to.route`.
+- `GuardDecision.redirect` takes a `RedirectTarget`: `.path(String)`, `.name(String, params:)`, or `.route(any Route)`.
+- `beforeEach(_:)` is sugar for `addGuard(_:)` with a closure guard; global guards run in registration order, then typed per-route guards.
+- `afterEach` hooks fire after a confirmed navigation (including handled actions); `from` is the router's last confirmed location.
+
+### Navigation verbs
+
+```swift
+router.push(name: "novel_detail", params: ["id": "123"], query: ["from": "home"])
+router.push(path: "/reading", query: ["novel_id": "1"])
+router.push(path: "/reading?novel_id=1")            // inline query also accepted
+router.replace(name: "tabbar")
+router.back()
+router.switchTab(name: "me")
+try await router.navigate(name: "novel_detail", params: ["id": "123"])   // full control
+try await router.navigate(path: "/reading?novel_id=1")
+```
+
+- `push` → `.push` transition unless the record's `meta.transition` says otherwise.
+- `replace` → new `.replace(animated:)` transition case: swaps the top of the current navigation stack (`history.replaceState` analog).
+- `back()` → pops the navigation stack, else dismisses the presented screen; returns whether anything happened.
+- `switchTab(name:)` → selects `meta.tabIndex` on the nearest `UITabBarController` from the window root; returns `Bool`.
+- Fire-and-forget verbs stay silent on guard cancellation and log other failures in DEBUG; the async `navigate` variants throw, and return the action's `Bool` for action records (`true` otherwise).
+- `open(url:via:)` (async) now returns `@discardableResult Bool` for the same reason.
+- Sample's `AppRouter.shared` maps to `Router.shared` (apps can `typealias AppRouter = Router`).
