@@ -25,8 +25,103 @@ dependencies: [
 ]
 ```
 
-Or in Xcode: **File > Add Package Dependencies...** and enter the repository
-URL.
+Or in Xcode: **File > Add Package Dependencies...** and enter
+`https://github.com/ultimatevegance/SwiftRouter`.
+
+## Quick Start
+
+Five steps from zero to your first navigation.
+
+### 1. Declare a route
+
+```swift
+import SwiftRouter
+
+struct UserDetail: Route {
+    let id: Int
+}
+```
+
+### 2. Register it at launch
+
+```swift
+@MainActor
+enum AppBootstrap {
+    static func configure() {
+        let router = Router.shared
+
+        router.register(UserDetail.self) { route, _ in
+            UserViewController(userID: route.id)
+        }
+
+        router.beforeEach { _, _ in .allow }  // optional: auth, analytics, etc.
+    }
+}
+```
+
+### 3. Call `configure()` in `SceneDelegate`
+
+```swift
+func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
+    AppBootstrap.configure()
+
+    guard let windowScene = scene as? UIWindowScene else { return }
+    window = UIWindow(windowScene: windowScene)
+    window?.rootViewController = UINavigationController(rootViewController: HomeViewController())
+    window?.makeKeyAndVisible()
+}
+```
+
+### 4. Navigate anywhere
+
+```swift
+Router.shared.push(UserDetail(id: 42))
+```
+
+### 5. Deep links (optional)
+
+```swift
+struct UserDetail: Route, DeepLinkable {
+    let id: Int
+    static let pattern: RoutePattern = "myapp://user/<int:id>"
+    init(parameters: RouteParameters) throws { id = try parameters.int("id") }
+    init(id: Int) { self.id = id }
+}
+
+// register with DeepLinkable — pattern is registered automatically
+router.register(UserDetail.self) { route, _ in UserViewController(userID: route.id) }
+
+// SceneDelegate
+Router.shared.open(url)  // myapp://user/42
+```
+
+**Usage order:** register routes → configure guards → show window → `push` /
+`navigate` / `open`. Never register routes from view controllers.
+
+### Multiple feature modules
+
+When the app grows, move registration into `RouteProvider` modules and install
+them once:
+
+```swift
+struct UserFeature: RouteProvider {
+    func registerRoutes(in router: Router) {
+        router.register(UserDetail.self) { route, _ in UserViewController(userID: route.id) }
+    }
+}
+
+@MainActor
+enum AppModules {
+    static func registerAll(in router: Router) {
+        router.installAll([UserFeature(), NovelFeature()])
+    }
+}
+
+// AppBootstrap.configure()
+AppModules.registerAll(in: router)
+```
+
+See [Feature Modules](#feature-modules) for the full modular setup.
 
 ## Routing Setup
 
@@ -277,6 +372,24 @@ struct NovelFeature: RouteProvider {
 }
 
 router.install(NovelFeature())
+```
+
+At app startup, register every module from one place:
+
+```swift
+@MainActor
+enum AppModules {
+    static func registerAll(in router: Router) {
+        router.installAll([
+            NovelFeature(),
+            UserFeature(),
+            ReaderFeature(),
+        ])
+    }
+}
+
+// SceneDelegate or AppDelegate
+AppModules.registerAll(in: Router.shared)
 ```
 
 Cross-feature navigation should go through shared route declarations, route

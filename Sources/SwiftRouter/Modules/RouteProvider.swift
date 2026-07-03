@@ -23,4 +23,22 @@ extension Router {
     public func install(_ provider: some RouteProvider) {
         provider.registerRoutes(in: self)
     }
+
+    /// Install multiple feature modules in order.
+    ///
+    /// Apps typically wrap this in a single bootstrap type:
+    ///
+    /// ```swift
+    /// @MainActor enum AppModules {
+    ///     static func registerAll(in router: Router) {
+    ///         router.installAll([NovelFeature(), UserFeature(), ReaderFeature()])
+    ///     }
+    /// }
+    /// AppModules.registerAll(in: Router.shared)
+    /// ```
+    public func installAll(_ providers: [any RouteProvider]) {
+        for provider in providers {
+            provider.registerRoutes(in: self)
+        }
+    }
 }
