@@ -8,6 +8,7 @@ import Foundation
     let matcher = URLMatcher()
 
     var beforeGuards: [any NavigationGuard] = []
+    var deepLinkFactories: [ObjectIdentifier: (RouteParameters) throws -> any Route] = [:]
     var afterHooks: [@MainActor (RouteLocation, RouteLocation?) -> Void] = []
     /// The last confirmed screen navigation — the `from` handed to guards.
     public private(set) var currentLocation: RouteLocation?
@@ -31,6 +32,14 @@ import Foundation
                                    guards: [any NavigationGuard] = [],
                                    factory: @escaping @MainActor (R, RoutingContext) -> PlatformViewController) {
         registry.register(type, guards: guards, factory: factory)
+    }
+
+    public func register<R: DeepLinkable>(_ type: R.Type,
+                                          guards: [any NavigationGuard] = [],
+                                          factory: @escaping @MainActor (R, RoutingContext) -> PlatformViewController) {
+        registry.register(type, guards: guards, factory: factory)
+        matcher.register(R.pattern, target: .routeType(ObjectIdentifier(type)))
+        deepLinkFactories[ObjectIdentifier(type)] = { parameters in try R(parameters: parameters) }
     }
 
     /// Register the dynamic route table — vue-router's `createRouter` routes array.
@@ -196,10 +205,20 @@ extension Router {
         }
     }
 
-    /// Typed deep-link construction — completed in the deep-link task.
+    /// Builds a typed destination from a matched deep-link pattern.
     func deepLinkDestination(typeID: ObjectIdentifier, match: URLMatchResult, mergedQuery: [String: String],
                              parameters: RouteParameters, context: Any?, url: URL?) throws -> ResolvedDestination {
-        throw RouterError.notRegistered(routeType: match.path)
+        guard let makeRoute = deepLinkFactories[typeID] else {
+            throw RouterError.notRegistered(routeType: match.path)
+        }
+        let route = try makeRoute(parameters)
+        guard let entry = registry.entry(for: type(of: route)) else {
+            throw RouterError.notRegistered(routeType: String(describing: type(of: route)))
+        }
+        let location = RouteLocation(name: String(describing: type(of: route)), path: match.path,
+                                     params: match.pathValues, query: mergedQuery, context: context,
+                                     meta: RouteMeta(), url: url, route: route, parameters: parameters)
+        return ResolvedDestination(kind: .typed(entry, route), location: location)
     }
 
     private func kind(of record: RouteRecord) -> ResolvedDestination.Kind {
@@ -302,5 +321,31 @@ extension Router {
                 #endif
             }
         }
+    }
+}
+
+// MARK: - Deep links
+
+extension Router {
+    /// Synchronously reports whether `url` matches a registered pattern;
+    /// the navigation itself runs fire-and-forget.
+    @discardableResult
+    public func open(_ url: URL) -> Bool {
+        guard matcher.match(url) != nil else { return false }
+        // Type-construction or guard failures surface via fireAndForget's
+        // DEBUG logging; the Bool only reports the match.
+        fireAndForget { _ = try await self.open(url) }
+        return true
+    }
+
+    /// Full-control variant: throws on no match, guard cancellation, or
+    /// construction failure. Returns the action's Bool for action records.
+    @discardableResult
+    public func open(_ url: URL, via transition: RouteTransition? = nil) async throws -> Bool {
+        guard matcher.match(url) != nil else {
+            throw RouterError.notRegistered(routeType: url.absoluteString)
+        }
+        let destination = try pathDestination(path: url.absoluteString, query: [:], context: nil, url: url)
+        return try await navigateCore(destination, transitionOverride: transition, redirectDepth: 0)
     }
 }
