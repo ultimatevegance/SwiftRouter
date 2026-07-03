@@ -21,7 +21,7 @@ Add SwiftRouter to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "<repository-url>", from: "1.0.0")
+    .package(url: "https://github.com/ultimatevegance/SwiftRouter", from: "1.0.0")
 ]
 ```
 
