@@ -22,8 +22,11 @@ import Foundation
     }
 
     private static func defaultPerformer() -> NavigationPerforming {
-        // The UIKit task swaps this for DefaultNavigationPerformer on iOS.
+        #if canImport(UIKit)
+        DefaultNavigationPerformer()
+        #else
         UnavailableNavigationPerformer()
+        #endif
     }
 
     // MARK: - Registration
