@@ -244,7 +244,7 @@ extension Router {
 
     @discardableResult
     func navigateCore(_ destination: ResolvedDestination, transitionOverride: RouteTransition?,
-                      redirectDepth: Int) async throws -> Bool {
+                      redirectDepth: Int, resultChannel: ResultChannel? = nil) async throws -> Bool {
         var destination = destination
         var depth = redirectDepth
 
@@ -266,7 +266,8 @@ extension Router {
             case .redirect(let target):
                 if depth + 1 > Self.maxRedirectDepth { throw RouterError.redirectLoopDetected(depth: depth + 1) }
                 let next = try resolve(target, context: destination.location.context)
-                return try await navigateCore(next, transitionOverride: nil, redirectDepth: depth + 1)
+                return try await navigateCore(next, transitionOverride: nil, redirectDepth: depth + 1,
+                                              resultChannel: resultChannel)
             }
         }
 
@@ -280,23 +281,36 @@ extension Router {
         case .component(let make):
             let viewController = make(destination.location)
             try performTransition(viewController, location: destination.location, from: from,
-                                  transitionOverride: transitionOverride, preferred: nil)
+                                  transitionOverride: transitionOverride, preferred: nil,
+                                  resultChannel: resultChannel)
             return true
         case .typed(let entry, let route):
-            let context = RoutingContext(url: destination.location.url, parameters: destination.location.parameters)
+            let context = RoutingContext(url: destination.location.url, parameters: destination.location.parameters,
+                                         resultChannel: resultChannel)
             let viewController = try entry.factory(route, context)
             try performTransition(viewController, location: destination.location, from: from,
                                   transitionOverride: transitionOverride,
-                                  preferred: type(of: route).preferredTransition)
+                                  preferred: type(of: route).preferredTransition,
+                                  resultChannel: resultChannel)
             return true
         }
     }
 
     private func performTransition(_ viewController: PlatformViewController, location: RouteLocation,
                                    from: RouteLocation?, transitionOverride: RouteTransition?,
-                                   preferred: RouteTransition?) throws {
+                                   preferred: RouteTransition?, resultChannel: ResultChannel? = nil) throws {
         let transition = transitionOverride ?? location.meta.transition ?? preferred ?? .push()
-        try navigationPerformer.perform(transition.resolved, viewController: viewController)
+        let resolved = transition.resolved
+        try navigationPerformer.perform(resolved, viewController: viewController)
+        if let resultChannel {
+            let performer = navigationPerformer
+            let animated: Bool = if case .present(let config) = resolved { config.animated } else { true }
+            resultChannel.onResolve = { [weak viewController] in
+                guard let viewController else { return }
+                performer.dismiss(viewController, animated: animated)
+            }
+            bindDeallocSignal(from: viewController, to: resultChannel)
+        }
         currentLocation = location
         runAfterHooks(to: location, from: from)
     }
@@ -321,6 +335,30 @@ extension Router {
                 #endif
             }
         }
+    }
+}
+
+// MARK: - Route results
+
+extension Router {
+    /// Present a screen and suspend until it finishes with a value or is
+    /// dismissed (→ nil). The factory's `RoutingContext` carries the
+    /// `finish(_:)` handle.
+    public func present<R: ResultRoute>(forResult route: R,
+                                        config: PresentationConfig = PresentationConfig()) async throws -> R.Result? {
+        let channel = ResultChannel()
+        // Deliberately not holding the returned view controller here: its
+        // only strong owners must be the presentation hierarchy, so the
+        // dealloc sentinel can fire when the screen goes away.
+        _ = try await navigateCore(try typedDestination(for: route), transitionOverride: .present(config),
+                                   redirectDepth: 0, resultChannel: channel)
+        let raw = await withCheckedContinuation { channel.attach($0) }
+        guard let raw else { return nil }
+        guard let typed = raw as? R.Result else {
+            assertionFailure("SwiftRouter: finish(_:) called with \(type(of: raw)), expected \(R.Result.self)")
+            return nil
+        }
+        return typed
     }
 }
 
