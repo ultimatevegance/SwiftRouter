@@ -1,28 +1,68 @@
 import Foundation
 
 /// A URL/path pattern such as `"myapp://user/<int:id>"` or `"/novel/:id"`.
+///
+/// Segment syntax:
+/// - `user` — literal
+/// - `:id` — colon placeholder (string-typed)
+/// - `<int:id>`, `<string:name>`, `<double:lat>`, `<bool:flag>`, `<uuid:token>` — typed placeholders
+/// - `<name>` — bare placeholder, defaults to string
+///
+/// A pattern with a scheme (`myapp://…`) matches only that scheme; without
+/// one it matches any scheme and plain paths. The host counts as the first
+/// segment (`myapp://user/42` → `user`, `42`). Matching precedence: literal
+/// beats placeholder, compared segment by segment left to right.
+///
+/// Usually built from a string literal:
+/// ```swift
+/// static let pattern: RoutePattern = "myapp://user/<int:id>"
+/// ```
 public struct RoutePattern: Sendable, Equatable, ExpressibleByStringLiteral {
+    /// Supported placeholder types in route patterns.
     public enum ParameterType: String, Sendable, Hashable {
-        case int, string, double, bool, uuid
+        /// A signed integer segment.
+        case int
+        /// Any non-empty string segment.
+        case string
+        /// A floating-point segment.
+        case double
+        /// A boolean segment (`true` or `false`, case-insensitive).
+        case bool
+        /// A UUID segment.
+        case uuid
     }
 
+    /// One parsed path segment.
     public enum Segment: Sendable, Equatable {
+        /// A literal segment that must match exactly.
         case literal(String)
+        /// A captured segment validated against `type`.
         case placeholder(name: String, type: ParameterType)
     }
 
+    /// Pattern parsing failures.
     public enum ParseError: Error, Equatable {
+        /// The pattern contained no usable segments.
         case emptyPattern
+        /// A placeholder segment such as `<>` or `<int:>` has no name.
         case emptyPlaceholder(segment: String)
+        /// A typed placeholder used a type other than int, string, double,
+        /// bool, or uuid.
         case unknownPlaceholderType(String, segment: String)
+        /// The segment contains malformed placeholder syntax.
         case malformedSegment(String)
+        /// Patterns describe only the path shape; query values are matched
+        /// separately.
         case queryNotAllowed(String)
     }
 
     /// nil means the pattern matches any scheme (including plain paths).
     public let scheme: String?
+    /// Parsed host/path segments. For URLs, the host is treated as the first
+    /// segment.
     public let segments: [Segment]
 
+    /// Parses and validates a route pattern string.
     public init(parsing pattern: String) throws {
         guard !pattern.isEmpty else { throw ParseError.emptyPattern }
         guard !pattern.contains("?") else { throw ParseError.queryNotAllowed(pattern) }

@@ -1,6 +1,16 @@
 import Foundation
 
+/// Main entry point for registering routes and driving navigation.
+///
+/// `Router` owns one shared pipeline for typed routes, dynamic route records,
+/// paths, names, and URLs. Every navigation path runs guards, follows redirects
+/// up to the same cap, resolves a transition, and then delegates the platform
+/// work to `navigationPerformer`.
 @MainActor public final class Router {
+    /// Process-wide convenience router.
+    ///
+    /// Apps that support multiple scenes or tests that need isolation can
+    /// create independent `Router` instances instead.
     public static let shared = Router()
 
     let registry = RouteRegistry()
@@ -10,13 +20,15 @@ import Foundation
     var beforeGuards: [any NavigationGuard] = []
     var deepLinkFactories: [ObjectIdentifier: (RouteParameters) throws -> any Route] = [:]
     var afterHooks: [@MainActor (RouteLocation, RouteLocation?) -> Void] = []
-    /// The last confirmed screen navigation — the `from` handed to guards.
+    /// The last confirmed screen navigation - the `from` handed to guards.
     public private(set) var currentLocation: RouteLocation?
 
     /// Performs the actual UIKit transitions. Replaceable for testing or
     /// custom navigation containers.
     public var navigationPerformer: NavigationPerforming
 
+    /// Creates a router with the default platform performer, or an injected
+    /// performer for tests and custom containers.
     public init(navigationPerformer: NavigationPerforming? = nil) {
         self.navigationPerformer = navigationPerformer ?? Self.defaultPerformer()
     }
@@ -31,12 +43,21 @@ import Foundation
 
     // MARK: - Registration
 
+    /// Registers a typed route factory.
+    ///
+    /// The factory is called after guards pass. Use the route value for typed
+    /// input and the `RoutingContext` for deep-link parameters, URLs, and result
+    /// completion.
     public func register<R: Route>(_ type: R.Type,
                                    guards: [any NavigationGuard] = [],
                                    factory: @escaping @MainActor (R, RoutingContext) -> PlatformViewController) {
         registry.register(type, guards: guards, factory: factory)
     }
 
+    /// Registers a typed route factory and its deep-link pattern.
+    ///
+    /// `open(_:)` and path navigation can then construct `R` via
+    /// `R.init(parameters:)` and feed it through the same guarded pipeline.
     public func register<R: DeepLinkable>(_ type: R.Type,
                                           guards: [any NavigationGuard] = [],
                                           factory: @escaping @MainActor (R, RoutingContext) -> PlatformViewController) {
@@ -45,7 +66,7 @@ import Foundation
         deepLinkFactories[ObjectIdentifier(type)] = { parameters in try R(parameters: parameters) }
     }
 
-    /// Register the dynamic route table — vue-router's `createRouter` routes array.
+    /// Registers dynamic route records.
     public func addRoutes(_ records: [RouteRecord]) {
         for record in records {
             routeTable.add(record, matcher: matcher)
@@ -67,12 +88,18 @@ import Foundation
 // MARK: - Guards
 
 extension Router {
+    /// Adds an object-based global guard.
+    ///
+    /// Global guards run in registration order before any typed route-specific
+    /// guards.
     public func addGuard(_ navigationGuard: any NavigationGuard) {
         beforeGuards.append(navigationGuard)
     }
 
-    /// vue-router's `beforeEach`, Swift flavor: return a decision instead of
-    /// calling `next(...)` — `.allow`, `.cancel`, or `.redirect(...)`.
+    /// Registers a closure-based global guard.
+    ///
+    /// Return `.allow`, `.cancel`, or `.redirect(...)` for each resolved
+    /// destination.
     public func beforeEach(_ body: @escaping @MainActor (RouteLocation, RouteLocation?) async -> GuardDecision) {
         addGuard(ClosureGuard(body: body))
     }
@@ -110,10 +137,18 @@ extension Router {
 
     // MARK: Public verbs
 
+    /// Navigates to a typed route and waits for the pipeline to finish.
+    ///
+    /// Throws for missing registrations, guard cancellation, redirect loops,
+    /// and platform navigation failures.
     public func navigate(to route: some Route, via transition: RouteTransition? = nil) async throws {
         _ = try await navigateCore(try typedDestination(for: route), transitionOverride: transition, redirectDepth: 0)
     }
 
+    /// Navigates to a dynamic route by name and waits for the pipeline.
+    ///
+    /// `params` fill path placeholders, `query` becomes `RouteLocation.query`,
+    /// and `context` is passed through to the component or action closure.
     @discardableResult
     public func navigate(name: String, params: [String: String] = [:], query: [String: String] = [:],
                          context: Any? = nil, via transition: RouteTransition? = nil) async throws -> Bool {
@@ -121,6 +156,10 @@ extension Router {
         return try await navigateCore(destination, transitionOverride: transition, redirectDepth: 0)
     }
 
+    /// Navigates to a dynamic or deep-link pattern by path or URL string.
+    ///
+    /// Inline query items are merged with `query`; explicit `query` values win
+    /// when keys collide.
     @discardableResult
     public func navigate(path: String, query: [String: String] = [:],
                          context: Any? = nil, via transition: RouteTransition? = nil) async throws -> Bool {
@@ -128,28 +167,38 @@ extension Router {
         return try await navigateCore(destination, transitionOverride: transition, redirectDepth: 0)
     }
 
+    /// Fire-and-forget typed push.
+    ///
+    /// Guard cancellations are swallowed; other failures print in DEBUG.
     public func push(_ route: some Route, animated: Bool = true) {
         fireAndForget { try await self.navigate(to: route, via: .push(animated: animated)) }
     }
 
+    /// Fire-and-forget typed modal presentation.
+    ///
+    /// For awaited result-producing presentations, use `present(forResult:)`.
     public func present(_ route: some Route, style: ModalStyle = .automatic, animated: Bool = true) {
         fireAndForget {
             try await self.navigate(to: route, via: .present(PresentationConfig(style: style, animated: animated)))
         }
     }
 
+    /// Fire-and-forget named push.
     public func push(name: String, params: [String: String] = [:], query: [String: String] = [:], context: Any? = nil) {
         fireAndForget { try await self.navigate(name: name, params: params, query: query, context: context) }
     }
 
+    /// Fire-and-forget path push.
     public func push(path: String, query: [String: String] = [:], context: Any? = nil) {
         fireAndForget { try await self.navigate(path: path, query: query, context: context) }
     }
 
+    /// Fire-and-forget named replacement of the current navigation item.
     public func replace(name: String, params: [String: String] = [:], query: [String: String] = [:], context: Any? = nil) {
         fireAndForget { try await self.navigate(name: name, params: params, query: query, context: context, via: .replace()) }
     }
 
+    /// Fire-and-forget path replacement of the current navigation item.
     public func replace(path: String, query: [String: String] = [:], context: Any? = nil) {
         fireAndForget { try await self.navigate(path: path, query: query, context: context, via: .replace()) }
     }
@@ -251,7 +300,7 @@ extension Router {
         var destination = destination
         var depth = redirectDepth
 
-        // Declarative record redirects resolve before guards (vue semantics).
+        // Declarative record redirects resolve before guards.
         while case .redirect(let target) = destination.kind {
             depth += 1
             if depth > Self.maxRedirectDepth { throw RouterError.redirectLoopDetected(depth: depth) }
@@ -345,7 +394,7 @@ extension Router {
 
 extension Router {
     /// Present a screen and suspend until it finishes with a value or is
-    /// dismissed (→ nil). The factory's `RoutingContext` carries the
+    /// dismissed (-> nil). The factory's `RoutingContext` carries the
     /// `finish(_:)` handle.
     public func present<R: ResultRoute>(forResult route: R,
                                         config: PresentationConfig = PresentationConfig()) async throws -> R.Result? {

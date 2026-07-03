@@ -7,10 +7,13 @@ import UIKit
 @MainActor public final class DefaultNavigationPerformer: NavigationPerforming {
     private weak var pinnedNavigationController: UINavigationController?
 
+    /// Creates a performer that discovers navigation targets automatically, or
+    /// uses `pinnedNavigationController` for pushes and presentations.
     public init(pinnedNavigationController: UINavigationController? = nil) {
         self.pinnedNavigationController = pinnedNavigationController
     }
 
+    /// Performs the concrete UIKit transition.
     public func perform(_ transition: ResolvedTransition, viewController: UIViewController) throws {
         switch transition {
         case .push(let animated):
@@ -40,10 +43,14 @@ import UIKit
         }
     }
 
+    /// Dismisses the presented controller, matching the behavior used by
+    /// result routes when `RoutingContext.finish(_:)` resolves.
     public func dismiss(_ viewController: UIViewController, animated: Bool) {
         (viewController.presentingViewController ?? viewController).dismiss(animated: animated)
     }
 
+    /// Pops the nearest navigation controller, or dismisses the current
+    /// presented controller when no pop is possible.
     @discardableResult
     public func back(animated: Bool) -> Bool {
         guard let top = pinnedNavigationController ?? Self.topMostViewController() else { return false }
@@ -59,6 +66,7 @@ import UIKit
         return false
     }
 
+    /// Selects `index` on the nearest tab bar controller.
     @discardableResult
     public func switchTab(index: Int) -> Bool {
         var current = Self.keyWindow()?.rootViewController ?? pinnedNavigationController
